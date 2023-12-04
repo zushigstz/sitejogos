@@ -1,719 +1,598 @@
+const counterDOM = document.getElementById('counter');
+const endDOM = document.getElementById('end');
 
-(function () {
-    var factory = function (signals) {
-    
-        var crossroads,
-            _hasOptionalGroupBug,
-            UNDEF;
-    
-        // Helpers -----------
-        //====================
-    
-        // IE 7-8 capture optional groups as empty strings while other browsers
-        // capture as `undefined`
-        _hasOptionalGroupBug = (/t(.+)?/).exec('t')[1] === '';
-    
-        function arrayIndexOf(arr, val) {
-            if (arr.indexOf) {
-                return arr.indexOf(val);
-            } else {
-                //Array.indexOf doesn't work on IE 6-7
-                var n = arr.length;
-                while (n--) {
-                    if (arr[n] === val) {
-                        return n;
-                    }
-                }
-                return -1;
-            }
-        }
-    
-        function arrayRemove(arr, item) {
-            var i = arrayIndexOf(arr, item);
-            if (i !== -1) {
-                arr.splice(i, 1);
-            }
-        }
-    
-        function isKind(val, kind) {
-            return '[object '+ kind +']' === Object.prototype.toString.call(val);
-        }
-    
-        function isRegExp(val) {
-            return isKind(val, 'RegExp');
-        }
-    
-        function isArray(val) {
-            return isKind(val, 'Array');
-        }
-    
-        function isFunction(val) {
-            return typeof val === 'function';
-        }
-    
-        //borrowed from AMD-utils
-        function typecastValue(val) {
-            var r;
-            if (val === null || val === 'null') {
-                r = null;
-            } else if (val === 'true') {
-                r = true;
-            } else if (val === 'false') {
-                r = false;
-            } else if (val === UNDEF || val === 'undefined') {
-                r = UNDEF;
-            } else if (val === '' || isNaN(val)) {
-                //isNaN('') returns false
-                r = val;
-            } else {
-                //parseFloat(null || '') returns NaN
-                r = parseFloat(val);
-            }
-            return r;
-        }
-    
-        function typecastArrayValues(values) {
-            var n = values.length,
-                result = [];
-            while (n--) {
-                result[n] = typecastValue(values[n]);
-            }
-            return result;
-        }
-    
-        // borrowed from MOUT
-        function decodeQueryString(queryStr, shouldTypecast) {
-            var queryArr = (queryStr || '').replace('?', '').split('&'),
-                reg = /([^=]+)=(.+)/,
-                i = -1,
-                obj = {},
-                equalIndex, cur, pValue, pName;
-    
-            while ((cur = queryArr[++i])) {
-                equalIndex = cur.indexOf('=');
-                pName = cur.substring(0, equalIndex);
-                pValue = decodeURIComponent(cur.substring(equalIndex + 1));
-                if (shouldTypecast !== false) {
-                    pValue = typecastValue(pValue);
-                }
-                if (pName in obj){
-                    if(isArray(obj[pName])){
-                        obj[pName].push(pValue);
-                    } else {
-                        obj[pName] = [obj[pName], pValue];
-                    }
-                } else {
-                    obj[pName] = pValue;
-               }
-            }
-            return obj;
-        }
-    
-    
-        // Crossroads --------
-        //====================
-    
-        /**
-         * @constructor
-         */
-        function Crossroads() {
-            this.bypassed = new signals.Signal();
-            this.routed = new signals.Signal();
-            this._routes = [];
-            this._prevRoutes = [];
-            this._piped = [];
-            this.resetState();
-        }
-    
-        Crossroads.prototype = {
-    
-            greedy : false,
-    
-            greedyEnabled : true,
-    
-            ignoreCase : true,
-    
-            ignoreState : false,
-    
-            shouldTypecast : false,
-    
-            normalizeFn : null,
-    
-            resetState : function(){
-                this._prevRoutes.length = 0;
-                this._prevMatchedRequest = null;
-                this._prevBypassedRequest = null;
-            },
-    
-            create : function () {
-                return new Crossroads();
-            },
-    
-            addRoute : function (pattern, callback, priority) {
-                var route = new Route(pattern, callback, priority, this);
-                this._sortedInsert(route);
-                return route;
-            },
-    
-            removeRoute : function (route) {
-                arrayRemove(this._routes, route);
-                route._destroy();
-            },
-    
-            removeAllRoutes : function () {
-                var n = this.getNumRoutes();
-                while (n--) {
-                    this._routes[n]._destroy();
-                }
-                this._routes.length = 0;
-            },
-    
-            parse : function (request, defaultArgs) {
-                request = request || '';
-                defaultArgs = defaultArgs || [];
-    
-                // should only care about different requests if ignoreState isn't true
-                if ( !this.ignoreState &&
-                    (request === this._prevMatchedRequest ||
-                     request === this._prevBypassedRequest) ) {
-                    return;
-                }
-    
-                var routes = this._getMatchedRoutes(request),
-                    i = 0,
-                    n = routes.length,
-                    cur;
-    
-                if (n) {
-                    this._prevMatchedRequest = request;
-    
-                    this._notifyPrevRoutes(routes, request);
-                    this._prevRoutes = routes;
-                    //should be incremental loop, execute routes in order
-                    while (i < n) {
-                        cur = routes[i];
-                        cur.route.matched.dispatch.apply(cur.route.matched, defaultArgs.concat(cur.params));
-                        cur.isFirst = !i;
-                        this.routed.dispatch.apply(this.routed, defaultArgs.concat([request, cur]));
-                        i += 1;
-                    }
-                } else {
-                    this._prevBypassedRequest = request;
-                    this.bypassed.dispatch.apply(this.bypassed, defaultArgs.concat([request]));
-                }
-    
-                this._pipeParse(request, defaultArgs);
-            },
-    
-            _notifyPrevRoutes : function(matchedRoutes, request) {
-                var i = 0, prev;
-                while (prev = this._prevRoutes[i++]) {
-                    //check if switched exist since route may be disposed
-                    if(prev.route.switched && this._didSwitch(prev.route, matchedRoutes)) {
-                        prev.route.switched.dispatch(request);
-                    }
-                }
-            },
-    
-            _didSwitch : function (route, matchedRoutes){
-                var matched,
-                    i = 0;
-                while (matched = matchedRoutes[i++]) {
-                    // only dispatch switched if it is going to a different route
-                    if (matched.route === route) {
-                        return false;
-                    }
-                }
-                return true;
-            },
-    
-            _pipeParse : function(request, defaultArgs) {
-                var i = 0, route;
-                while (route = this._piped[i++]) {
-                    route.parse(request, defaultArgs);
-                }
-            },
-    
-            getNumRoutes : function () {
-                return this._routes.length;
-            },
-    
-            _sortedInsert : function (route) {
-                //simplified insertion sort
-                var routes = this._routes,
-                    n = routes.length;
-                do { --n; } while (routes[n] && route._priority <= routes[n]._priority);
-                routes.splice(n+1, 0, route);
-            },
-    
-            _getMatchedRoutes : function (request) {
-                var res = [],
-                    routes = this._routes,
-                    n = routes.length,
-                    route;
-                //should be decrement loop since higher priorities are added at the end of array
-                while (route = routes[--n]) {
-                    if ((!res.length || this.greedy || route.greedy) && route.match(request)) {
-                        res.push({
-                            route : route,
-                            params : route._getParamsArray(request)
-                        });
-                    }
-                    if (!this.greedyEnabled && res.length) {
-                        break;
-                    }
-                }
-                return res;
-            },
-    
-            pipe : function (otherRouter) {
-                this._piped.push(otherRouter);
-            },
-    
-            unpipe : function (otherRouter) {
-                arrayRemove(this._piped, otherRouter);
-            },
-    
-            toString : function () {
-                return '[crossroads numRoutes:'+ this.getNumRoutes() +']';
-            }
-        };
-    
-        //"static" instance
-        crossroads = new Crossroads();
-        crossroads.VERSION = '0.12.2';
-    
-        crossroads.NORM_AS_ARRAY = function (req, vals) {
-            return [vals.vals_];
-        };
-    
-        crossroads.NORM_AS_OBJECT = function (req, vals) {
-            return [vals];
-        };
-    
-    
-        // Route --------------
-        //=====================
-    
-        /**
-         * @constructor
-         */
-        function Route(pattern, callback, priority, router) {
-            var isRegexPattern = isRegExp(pattern),
-                patternLexer = router.patternLexer;
-            this._router = router;
-            this._pattern = pattern;
-            this._paramsIds = isRegexPattern? null : patternLexer.getParamIds(pattern);
-            this._optionalParamsIds = isRegexPattern? null : patternLexer.getOptionalParamsIds(pattern);
-            this._matchRegexp = isRegexPattern? pattern : patternLexer.compilePattern(pattern, router.ignoreCase);
-            this.matched = new signals.Signal();
-            this.switched = new signals.Signal();
-            if (callback) {
-                this.matched.add(callback);
-            }
-            this._priority = priority || 0;
-        }
-    
-        Route.prototype = {
-    
-            greedy : false,
-    
-            rules : void(0),
-    
-            match : function (request) {
-                request = request || '';
-                return this._matchRegexp.test(request) && this._validateParams(request); //validate params even if regexp because of `request_` rule.
-            },
-    
-            _validateParams : function (request) {
-                var rules = this.rules,
-                    values = this._getParamsObject(request),
-                    key;
-                for (key in rules) {
-                    // normalize_ isn't a validation rule... (#39)
-                    if(key !== 'normalize_' && rules.hasOwnProperty(key) && ! this._isValidParam(request, key, values)){
-                        return false;
-                    }
-                }
-                return true;
-            },
-    
-            _isValidParam : function (request, prop, values) {
-                var validationRule = this.rules[prop],
-                    val = values[prop],
-                    isValid = false,
-                    isQuery = (prop.indexOf('?') === 0);
-    
-                if (val == null && this._optionalParamsIds && arrayIndexOf(this._optionalParamsIds, prop) !== -1) {
-                    isValid = true;
-                }
-                else if (isRegExp(validationRule)) {
-                    if (isQuery) {
-                        val = values[prop +'_']; //use raw string
-                    }
-                    isValid = validationRule.test(val);
-                }
-                else if (isArray(validationRule)) {
-                    if (isQuery) {
-                        val = values[prop +'_']; //use raw string
-                    }
-                    isValid = this._isValidArrayRule(validationRule, val);
-                }
-                else if (isFunction(validationRule)) {
-                    isValid = validationRule(val, request, values);
-                }
-    
-                return isValid; //fail silently if validationRule is from an unsupported type
-            },
-    
-            _isValidArrayRule : function (arr, val) {
-                if (! this._router.ignoreCase) {
-                    return arrayIndexOf(arr, val) !== -1;
-                }
-    
-                if (typeof val === 'string') {
-                    val = val.toLowerCase();
-                }
-    
-                var n = arr.length,
-                    item,
-                    compareVal;
-    
-                while (n--) {
-                    item = arr[n];
-                    compareVal = (typeof item === 'string')? item.toLowerCase() : item;
-                    if (compareVal === val) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-    
-            _getParamsObject : function (request) {
-                var shouldTypecast = this._router.shouldTypecast,
-                    values = this._router.patternLexer.getParamValues(request, this._matchRegexp, shouldTypecast),
-                    o = {},
-                    n = values.length,
-                    param, val;
-                while (n--) {
-                    val = values[n];
-                    if (this._paramsIds) {
-                        param = this._paramsIds[n];
-                        if (param.indexOf('?') === 0 && val) {
-                            //make a copy of the original string so array and
-                            //RegExp validation can be applied properly
-                            o[param +'_'] = val;
-                            //update vals_ array as well since it will be used
-                            //during dispatch
-                            val = decodeQueryString(val, shouldTypecast);
-                            values[n] = val;
-                        }
-                        // IE will capture optional groups as empty strings while other
-                        // browsers will capture `undefined` so normalize behavior.
-                        // see: #gh-58, #gh-59, #gh-60
-                        if ( _hasOptionalGroupBug && val === '' && arrayIndexOf(this._optionalParamsIds, param) !== -1 ) {
-                            val = void(0);
-                            values[n] = val;
-                        }
-                        o[param] = val;
-                    }
-                    //alias to paths and for RegExp pattern
-                    o[n] = val;
-                }
-                o.request_ = shouldTypecast? typecastValue(request) : request;
-                o.vals_ = values;
-                return o;
-            },
-    
-            _getParamsArray : function (request) {
-                var norm = this.rules? this.rules.normalize_ : null,
-                    params;
-                norm = norm || this._router.normalizeFn; // default normalize
-                if (norm && isFunction(norm)) {
-                    params = norm(request, this._getParamsObject(request));
-                } else {
-                    params = this._getParamsObject(request).vals_;
-                }
-                return params;
-            },
-    
-            interpolate : function(replacements) {
-                var str = this._router.patternLexer.interpolate(this._pattern, replacements);
-                if (! this._validateParams(str) ) {
-                    throw new Error('Generated string doesn\'t validate against `Route.rules`.');
-                }
-                return str;
-            },
-    
-            dispose : function () {
-                this._router.removeRoute(this);
-            },
-    
-            _destroy : function () {
-                this.matched.dispose();
-                this.switched.dispose();
-                this.matched = this.switched = this._pattern = this._matchRegexp = null;
-            },
-    
-            toString : function () {
-                return '[Route pattern:"'+ this._pattern +'", numListeners:'+ this.matched.getNumListeners() +']';
-            }
-    
-        };
-    
-    
-    
-        // Pattern Lexer ------
-        //=====================
-    
-        Crossroads.prototype.patternLexer = (function () {
-    
-            var
-                //match chars that should be escaped on string regexp
-                ESCAPE_CHARS_REGEXP = /[\\.+*?\^$\[\](){}\/'#]/g,
-    
-                //trailing slashes (begin/end of string)
-                LOOSE_SLASHES_REGEXP = /^\/|\/$/g,
-                LEGACY_SLASHES_REGEXP = /\/$/g,
-    
-                //params - everything between `{ }` or `: :`
-                PARAMS_REGEXP = /(?:\{|:)([^}:]+)(?:\}|:)/g,
-    
-                //used to save params during compile (avoid escaping things that
-                //shouldn't be escaped).
-                TOKENS = {
-                    'OS' : {
-                        //optional slashes
-                        //slash between `::` or `}:` or `\w:` or `:{?` or `}{?` or `\w{?`
-                        rgx : /([:}]|\w(?=\/))\/?(:|(?:\{\?))/g,
-                        save : '$1{{id}}$2',
-                        res : '\\/?'
-                    },
-                    'RS' : {
-                        //required slashes
-                        //used to insert slash between `:{` and `}{`
-                        rgx : /([:}])\/?(\{)/g,
-                        save : '$1{{id}}$2',
-                        res : '\\/'
-                    },
-                    'RQ' : {
-                        //required query string - everything in between `{? }`
-                        rgx : /\{\?([^}]+)\}/g,
-                        //everything from `?` till `#` or end of string
-                        res : '\\?([^#]+)'
-                    },
-                    'OQ' : {
-                        //optional query string - everything in between `:? :`
-                        rgx : /:\?([^:]+):/g,
-                        //everything from `?` till `#` or end of string
-                        res : '(?:\\?([^#]*))?'
-                    },
-                    'OR' : {
-                        //optional rest - everything in between `: *:`
-                        rgx : /:([^:]+)\*:/g,
-                        res : '(.*)?' // optional group to avoid passing empty string as captured
-                    },
-                    'RR' : {
-                        //rest param - everything in between `{ *}`
-                        rgx : /\{([^}]+)\*\}/g,
-                        res : '(.+)'
-                    },
-                    // required/optional params should come after rest segments
-                    'RP' : {
-                        //required params - everything between `{ }`
-                        rgx : /\{([^}]+)\}/g,
-                        res : '([^\\/?]+)'
-                    },
-                    'OP' : {
-                        //optional params - everything between `: :`
-                        rgx : /:([^:]+):/g,
-                        res : '([^\\/?]+)?\/?'
-                    }
-                },
-    
-                LOOSE_SLASH = 1,
-                STRICT_SLASH = 2,
-                LEGACY_SLASH = 3,
-    
-                _slashMode = LOOSE_SLASH;
-    
-    
-            function precompileTokens(){
-                var key, cur;
-                for (key in TOKENS) {
-                    if (TOKENS.hasOwnProperty(key)) {
-                        cur = TOKENS[key];
-                        cur.id = '__CR_'+ key +'__';
-                        cur.save = ('save' in cur)? cur.save.replace('{{id}}', cur.id) : cur.id;
-                        cur.rRestore = new RegExp(cur.id, 'g');
-                    }
-                }
-            }
-            precompileTokens();
-    
-    
-            function captureVals(regex, pattern) {
-                var vals = [], match;
-                // very important to reset lastIndex since RegExp can have "g" flag
-                // and multiple runs might affect the result, specially if matching
-                // same string multiple times on IE 7-8
-                regex.lastIndex = 0;
-                while (match = regex.exec(pattern)) {
-                    vals.push(match[1]);
-                }
-                return vals;
-            }
-    
-            function getParamIds(pattern) {
-                return captureVals(PARAMS_REGEXP, pattern);
-            }
-    
-            function getOptionalParamsIds(pattern) {
-                return captureVals(TOKENS.OP.rgx, pattern);
-            }
-    
-            function compilePattern(pattern, ignoreCase) {
-                pattern = pattern || '';
-    
-                if(pattern){
-                    if (_slashMode === LOOSE_SLASH) {
-                        pattern = pattern.replace(LOOSE_SLASHES_REGEXP, '');
-                    }
-                    else if (_slashMode === LEGACY_SLASH) {
-                        pattern = pattern.replace(LEGACY_SLASHES_REGEXP, '');
-                    }
-    
-                    //save tokens
-                    pattern = replaceTokens(pattern, 'rgx', 'save');
-                    //regexp escape
-                    pattern = pattern.replace(ESCAPE_CHARS_REGEXP, '\\$&');
-                    //restore tokens
-                    pattern = replaceTokens(pattern, 'rRestore', 'res');
-    
-                    if (_slashMode === LOOSE_SLASH) {
-                        pattern = '\\/?'+ pattern;
-                    }
-                }
-    
-                if (_slashMode !== STRICT_SLASH) {
-                    //single slash is treated as empty and end slash is optional
-                    pattern += '\\/?';
-                }
-                return new RegExp('^'+ pattern + '$', ignoreCase? 'i' : '');
-            }
-    
-            function replaceTokens(pattern, regexpName, replaceName) {
-                var cur, key;
-                for (key in TOKENS) {
-                    if (TOKENS.hasOwnProperty(key)) {
-                        cur = TOKENS[key];
-                        pattern = pattern.replace(cur[regexpName], cur[replaceName]);
-                    }
-                }
-                return pattern;
-            }
-    
-            function getParamValues(request, regexp, shouldTypecast) {
-                var vals = regexp.exec(request);
-                if (vals) {
-                    vals.shift();
-                    if (shouldTypecast) {
-                        vals = typecastArrayValues(vals);
-                    }
-                }
-                return vals;
-            }
-    
-            function interpolate(pattern, replacements) {
-                // default to an empty object because pattern might have just
-                // optional arguments
-                replacements = replacements || {};
-                if (typeof pattern !== 'string') {
-                    throw new Error('Route pattern should be a string.');
-                }
-    
-                var replaceFn = function(match, prop){
-                        var val;
-                        prop = (prop.substr(0, 1) === '?')? prop.substr(1) : prop;
-                        if (replacements[prop] != null) {
-                            if (typeof replacements[prop] === 'object') {
-                                var queryParts = [], rep;
-                                for(var key in replacements[prop]) {
-                                    rep = replacements[prop][key];
-                                    if (isArray(rep)) {
-                                        for (var k in rep) {
-                                            if ( key.slice(-2) == '[]' ) {
-                                                queryParts.push(encodeURI(key.slice(0, -2)) + '[]=' + encodeURI(rep[k]));
-                                            } else {
-                                                queryParts.push(encodeURI(key + '=' + rep[k]));
-                                            }
-                                        }
-                                    }
-                                    else {
-                                        queryParts.push(encodeURI(key + '=' + rep));
-                                    }
-                                }
-                                val = '?' + queryParts.join('&');
-                            } else {
-                                // make sure value is a string see #gh-54
-                                val = String(replacements[prop]);
-                            }
-    
-                            if (match.indexOf('*') === -1 && val.indexOf('/') !== -1) {
-                                throw new Error('Invalid value "'+ val +'" for segment "'+ match +'".');
-                            }
-                        }
-                        else if (match.indexOf('{') !== -1) {
-                            throw new Error('The segment '+ match +' is required.');
-                        }
-                        else {
-                            val = '';
-                        }
-                        return val;
-                    };
-    
-                if (! TOKENS.OS.trail) {
-                    TOKENS.OS.trail = new RegExp('(?:'+ TOKENS.OS.id +')+$');
-                }
-    
-                return pattern
-                            .replace(TOKENS.OS.rgx, TOKENS.OS.save)
-                            .replace(PARAMS_REGEXP, replaceFn)
-                            .replace(TOKENS.OS.trail, '') // remove trailing
-                            .replace(TOKENS.OS.rRestore, '/'); // add slash between segments
-            }
-    
-            //API
-            return {
-                strict : function(){
-                    _slashMode = STRICT_SLASH;
-                },
-                loose : function(){
-                    _slashMode = LOOSE_SLASH;
-                },
-                legacy : function(){
-                    _slashMode = LEGACY_SLASH;
-                },
-                getParamIds : getParamIds,
-                getOptionalParamsIds : getOptionalParamsIds,
-                getParamValues : getParamValues,
-                compilePattern : compilePattern,
-                interpolate : interpolate
-            };
-    
-        }());
-    
-    
-        return crossroads;
-    };
-    
-    if (typeof define === 'function' && define.amd) {
-        define(['signals'], factory);
-    } else if (typeof module !== 'undefined' && module.exports) { //Node
-        module.exports = factory(require('signals'));
-    } else {
-        /*jshint sub:true */
-        window['crossroads'] = factory(window['signals']);
+const scene = new THREE.Scene();
+
+const distance = 500;
+const camera = new THREE.OrthographicCamera( window.innerWidth/-2, window.innerWidth/2, window.innerHeight / 2, window.innerHeight / -2, 0.1, 10000 );
+
+camera.rotation.x = 50*Math.PI/180;
+camera.rotation.y = 20*Math.PI/180;
+camera.rotation.z = 10*Math.PI/180;
+
+const initialCameraPositionY = -Math.tan(camera.rotation.x)*distance;
+const initialCameraPositionX = Math.tan(camera.rotation.y)*Math.sqrt(distance**2 + initialCameraPositionY**2);
+camera.position.y = initialCameraPositionY;
+camera.position.x = initialCameraPositionX;
+camera.position.z = distance;
+
+const zoom = 2;
+
+const chickenSize = 15;
+
+const positionWidth = 42;
+const columns = 17;
+const boardWidth = positionWidth*columns;
+
+const stepTime = 200; // Miliseconds it takes for the chicken to take a step forward, backward, left or right
+
+let lanes;
+let currentLane;
+let currentColumn;
+
+let previousTimestamp;
+let startMoving;
+let moves;
+let stepStartTimestamp;
+
+const carFrontTexture = new Texture(40,80,[{x: 0, y: 10, w: 30, h: 60 }]);
+const carBackTexture = new Texture(40,80,[{x: 10, y: 10, w: 30, h: 60 }]);
+const carRightSideTexture = new Texture(110,40,[{x: 10, y: 0, w: 50, h: 30 }, {x: 70, y: 0, w: 30, h: 30 }]);
+const carLeftSideTexture = new Texture(110,40,[{x: 10, y: 10, w: 50, h: 30 }, {x: 70, y: 10, w: 30, h: 30 }]);
+
+const truckFrontTexture = new Texture(30,30,[{x: 15, y: 0, w: 10, h: 30 }]);
+const truckRightSideTexture = new Texture(25,30,[{x: 0, y: 15, w: 10, h: 10 }]);
+const truckLeftSideTexture = new Texture(25,30,[{x: 0, y: 5, w: 10, h: 10 }]);
+
+const generateLanes = () => [-9,-8,-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9].map((index) => {
+  const lane = new Lane(index);
+  lane.mesh.position.y = index*positionWidth*zoom;
+  scene.add( lane.mesh );
+  return lane;
+}).filter((lane) => lane.index >= 0);
+
+const addLane = () => {
+  const index = lanes.length;
+  const lane = new Lane(index);
+  lane.mesh.position.y = index*positionWidth*zoom;
+  scene.add(lane.mesh);
+  lanes.push(lane);
+}
+
+const chicken = new Chicken();
+scene.add( chicken );
+
+hemiLight = new THREE.HemisphereLight(0xffffff, 0xffffff, 0.6);
+scene.add(hemiLight)
+
+const initialDirLightPositionX = -100;
+const initialDirLightPositionY = -100;
+dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+dirLight.position.set(initialDirLightPositionX, initialDirLightPositionY, 200);
+dirLight.castShadow = true;
+dirLight.target = chicken;
+scene.add(dirLight);
+
+dirLight.shadow.mapSize.width = 2048;
+dirLight.shadow.mapSize.height = 2048;
+var d = 500;
+dirLight.shadow.camera.left = - d;
+dirLight.shadow.camera.right = d;
+dirLight.shadow.camera.top = d;
+dirLight.shadow.camera.bottom = - d;
+
+// var helper = new THREE.CameraHelper( dirLight.shadow.camera );
+// var helper = new THREE.CameraHelper( camera );
+// scene.add(helper)
+
+backLight = new THREE.DirectionalLight(0x000000, .4);
+backLight.position.set(200, 200, 50);
+backLight.castShadow = true;
+scene.add(backLight)
+
+const laneTypes = ['car', 'truck', 'forest'];
+const laneSpeeds = [2, 2.5, 3];
+const vechicleColors = [0xa52523, 0xbdb638, 0x78b14b];
+const threeHeights = [20,45,60];
+
+const initaliseValues = () => {
+  lanes = generateLanes()
+
+  currentLane = 0;
+  currentColumn = Math.floor(columns/2);
+
+  previousTimestamp = null;
+
+  startMoving = false;
+  moves = [];
+  stepStartTimestamp;
+
+  chicken.position.x = 0;
+  chicken.position.y = 0;
+
+  camera.position.y = initialCameraPositionY;
+  camera.position.x = initialCameraPositionX;
+
+  dirLight.position.x = initialDirLightPositionX;
+  dirLight.position.y = initialDirLightPositionY;
+}
+
+initaliseValues();
+
+const renderer = new THREE.WebGLRenderer({
+  alpha: true,
+  antialias: true
+});
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setSize( window.innerWidth, window.innerHeight );
+document.body.appendChild( renderer.domElement );
+
+function Texture(width, height, rects) {
+  const canvas = document.createElement( "canvas" );
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext( "2d" );
+  context.fillStyle = "#ffffff";
+  context.fillRect( 0, 0, width, height );
+  context.fillStyle = "rgba(0,0,0,0.6)";
+  rects.forEach(rect => {
+    context.fillRect(rect.x, rect.y, rect.w, rect.h);
+  });
+  return new THREE.CanvasTexture(canvas);
+}
+
+function Wheel() {
+  const wheel = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 12*zoom, 33*zoom, 12*zoom ),
+    new THREE.MeshLambertMaterial( { color: 0x333333, flatShading: true } )
+  );
+  wheel.position.z = 6*zoom;
+  return wheel;
+}
+
+function Car() {
+  const car = new THREE.Group();
+  const color = vechicleColors[Math.floor(Math.random() * vechicleColors.length)];
+
+  const main = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 60*zoom, 30*zoom, 15*zoom ),
+    new THREE.MeshPhongMaterial( { color, flatShading: true } )
+  );
+  main.position.z = 12*zoom;
+  main.castShadow = true;
+  main.receiveShadow = true;
+  car.add(main)
+
+  const cabin = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 33*zoom, 24*zoom, 12*zoom ),
+    [
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true, map: carBackTexture } ),
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true, map: carFrontTexture } ),
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true, map: carRightSideTexture } ),
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true, map: carLeftSideTexture } ),
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true } ), // top
+      new THREE.MeshPhongMaterial( { color: 0xcccccc, flatShading: true } ) // bottom
+    ]
+  );
+  cabin.position.x = 6*zoom;
+  cabin.position.z = 25.5*zoom;
+  cabin.castShadow = true;
+  cabin.receiveShadow = true;
+  car.add( cabin );
+
+  const frontWheel = new Wheel();
+  frontWheel.position.x = -18*zoom;
+  car.add( frontWheel );
+
+  const backWheel = new Wheel();
+  backWheel.position.x = 18*zoom;
+  car.add( backWheel );
+
+  car.castShadow = true;
+  car.receiveShadow = false;
+
+  return car;
+}
+
+function Truck() {
+  const truck = new THREE.Group();
+  const color = vechicleColors[Math.floor(Math.random() * vechicleColors.length)];
+
+
+  const base = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 100*zoom, 25*zoom, 5*zoom ),
+    new THREE.MeshLambertMaterial( { color: 0xb4c6fc, flatShading: true } )
+  );
+  base.position.z = 10*zoom;
+  truck.add(base)
+
+  const cargo = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 75*zoom, 35*zoom, 40*zoom ),
+    new THREE.MeshPhongMaterial( { color: 0xb4c6fc, flatShading: true } )
+  );
+  cargo.position.x = 15*zoom;
+  cargo.position.z = 30*zoom;
+  cargo.castShadow = true;
+  cargo.receiveShadow = true;
+  truck.add(cargo)
+
+  const cabin = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 25*zoom, 30*zoom, 30*zoom ),
+    [
+      new THREE.MeshPhongMaterial( { color, flatShading: true } ), // back
+      new THREE.MeshPhongMaterial( { color, flatShading: true, map: truckFrontTexture } ),
+      new THREE.MeshPhongMaterial( { color, flatShading: true, map: truckRightSideTexture } ),
+      new THREE.MeshPhongMaterial( { color, flatShading: true, map: truckLeftSideTexture } ),
+      new THREE.MeshPhongMaterial( { color, flatShading: true } ), // top
+      new THREE.MeshPhongMaterial( { color, flatShading: true } ) // bottom
+    ]
+  );
+  cabin.position.x = -40*zoom;
+  cabin.position.z = 20*zoom;
+  cabin.castShadow = true;
+  cabin.receiveShadow = true;
+  truck.add( cabin );
+
+  const frontWheel = new Wheel();
+  frontWheel.position.x = -38*zoom;
+  truck.add( frontWheel );
+
+  const middleWheel = new Wheel();
+  middleWheel.position.x = -10*zoom;
+  truck.add( middleWheel );
+
+  const backWheel = new Wheel();
+  backWheel.position.x = 30*zoom;
+  truck.add( backWheel );
+
+  return truck;
+}
+
+function Three() {
+  const three = new THREE.Group();
+
+  const trunk = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 15*zoom, 15*zoom, 20*zoom ),
+    new THREE.MeshPhongMaterial( { color: 0x4d2926, flatShading: true } )
+  );
+  trunk.position.z = 10*zoom;
+  trunk.castShadow = true;
+  trunk.receiveShadow = true;
+  three.add(trunk);
+
+  height = threeHeights[Math.floor(Math.random()*threeHeights.length)];
+
+  const crown = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 30*zoom, 30*zoom, height*zoom ),
+    new THREE.MeshLambertMaterial( { color: 0x7aa21d, flatShading: true } )
+  );
+  crown.position.z = (height/2+20)*zoom;
+  crown.castShadow = true;
+  crown.receiveShadow = false;
+  three.add(crown);
+
+  return three;
+}
+
+function Chicken() {
+  const chicken = new THREE.Group();
+
+  const body = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( chickenSize*zoom, chickenSize*zoom, 20*zoom ),
+    new THREE.MeshPhongMaterial( { color: 0xffffff, flatShading: true } )
+  );
+  body.position.z = 10*zoom;
+  body.castShadow = true;
+  body.receiveShadow = true;
+  chicken.add(body);
+
+  const rowel = new THREE.Mesh(
+    new THREE.BoxBufferGeometry( 2*zoom, 4*zoom, 2*zoom ),
+    new THREE.MeshLambertMaterial( { color: 0xF0619A, flatShading: true } )
+  );
+  rowel.position.z = 21*zoom;
+  rowel.castShadow = true;
+  rowel.receiveShadow = false;
+  chicken.add(rowel);
+
+  return chicken;
+}
+
+function Road() {
+  const road = new THREE.Group();
+
+  const createSection = color => new THREE.Mesh(
+    new THREE.PlaneBufferGeometry( boardWidth*zoom, positionWidth*zoom ),
+    new THREE.MeshPhongMaterial( { color } )
+  );
+
+  const middle = createSection(0x454A59);
+  middle.receiveShadow = true;
+  road.add(middle);
+
+  const left = createSection(0x393D49);
+  left.position.x = - boardWidth*zoom;
+  road.add(left);
+
+  const right = createSection(0x393D49);
+  right.position.x = boardWidth*zoom;
+  road.add(right);
+
+  return road;
+}
+
+function Grass() {
+  const grass = new THREE.Group();
+
+  const createSection = color => new THREE.Mesh(
+    new THREE.BoxBufferGeometry( boardWidth*zoom, positionWidth*zoom, 3*zoom ),
+    new THREE.MeshPhongMaterial( { color } )
+  );
+
+  const middle = createSection(0xbaf455);
+  middle.receiveShadow = true;
+  grass.add(middle);
+
+  const left = createSection(0x99C846);
+  left.position.x = - boardWidth*zoom;
+  grass.add(left);
+
+  const right = createSection(0x99C846);
+  right.position.x = boardWidth*zoom;
+  grass.add(right);
+
+  grass.position.z = 1.5*zoom;
+  return grass;
+}
+
+function Lane(index) {
+  this.index = index;
+  this.type = index <= 0 ? 'field' : laneTypes[Math.floor(Math.random()*laneTypes.length)];
+
+  switch(this.type) {
+    case 'field': {
+      this.type = 'field';
+      this.mesh = new Grass();
+      break;
     }
-    
-    }());
+    case 'forest': {
+      this.mesh = new Grass();
+
+      this.occupiedPositions = new Set();
+      this.threes = [1,2,3,4].map(() => {
+        const three = new Three();
+        let position;
+        do {
+          position = Math.floor(Math.random()*columns);
+        }while(this.occupiedPositions.has(position))
+          this.occupiedPositions.add(position);
+        three.position.x = (position*positionWidth+positionWidth/2)*zoom-boardWidth*zoom/2;
+        this.mesh.add( three );
+        return three;
+      })
+      break;
+    }
+    case 'car' : {
+      this.mesh = new Road();
+      this.direction = Math.random() >= 0.5;
+
+      const occupiedPositions = new Set();
+      this.vechicles = [1,2,3].map(() => {
+        const vechicle = new Car();
+        let position;
+        do {
+          position = Math.floor(Math.random()*columns/2);
+        }while(occupiedPositions.has(position))
+          occupiedPositions.add(position);
+        vechicle.position.x = (position*positionWidth*2+positionWidth/2)*zoom-boardWidth*zoom/2;
+        if(!this.direction) vechicle.rotation.z = Math.PI;
+        this.mesh.add( vechicle );
+        return vechicle;
+      })
+
+      this.speed = laneSpeeds[Math.floor(Math.random()*laneSpeeds.length)];
+      break;
+    }
+    case 'truck' : {
+      this.mesh = new Road();
+      this.direction = Math.random() >= 0.5;
+
+      const occupiedPositions = new Set();
+      this.vechicles = [1,2].map(() => {
+        const vechicle = new Truck();
+        let position;
+        do {
+          position = Math.floor(Math.random()*columns/3);
+        }while(occupiedPositions.has(position))
+          occupiedPositions.add(position);
+        vechicle.position.x = (position*positionWidth*3+positionWidth/2)*zoom-boardWidth*zoom/2;
+        if(!this.direction) vechicle.rotation.z = Math.PI;
+        this.mesh.add( vechicle );
+        return vechicle;
+      })
+
+      this.speed = laneSpeeds[Math.floor(Math.random()*laneSpeeds.length)];
+      break;
+    }
+  }
+}
+
+document.querySelector("#retry").addEventListener("click", () => {
+  lanes.forEach(lane => scene.remove( lane.mesh ));
+  initaliseValues();
+  endDOM.style.visibility = 'hidden';
+});
+
+document.getElementById('forward').addEventListener("click", () => move('forward'));
+
+document.getElementById('backward').addEventListener("click", () => move('backward'));
+
+document.getElementById('left').addEventListener("click", () => move('left'));
+
+document.getElementById('right').addEventListener("click", () => move('right'));
+
+window.addEventListener("keydown", event => {
+  if (event.keyCode == '38') {
+    // up arrow
+    move('forward');
+  }
+  else if (event.keyCode == '40') {
+    // down arrow
+    move('backward');
+  }
+  else if (event.keyCode == '37') {
+    // left arrow
+    move('left');
+  }
+  else if (event.keyCode == '39') {
+    // right arrow
+    move('right');
+  }
+});
+
+function move(direction) {
+  const finalPositions = moves.reduce((position,move) => {
+    if(move === 'forward') return {lane: position.lane+1, column: position.column};
+    if(move === 'backward') return {lane: position.lane-1, column: position.column};
+    if(move === 'left') return {lane: position.lane, column: position.column-1};
+    if(move === 'right') return {lane: position.lane, column: position.column+1};
+  }, {lane: currentLane, column: currentColumn})
+
+  if (direction === 'forward') {
+    if(lanes[finalPositions.lane+1].type === 'forest' && lanes[finalPositions.lane+1].occupiedPositions.has(finalPositions.column)) return;
+    if(!stepStartTimestamp) startMoving = true;
+    addLane();
+  }
+  else if (direction === 'backward') {
+    if(finalPositions.lane === 0) return;
+    if(lanes[finalPositions.lane-1].type === 'forest' && lanes[finalPositions.lane-1].occupiedPositions.has(finalPositions.column)) return;
+    if(!stepStartTimestamp) startMoving = true;
+  }
+  else if (direction === 'left') {
+    if(finalPositions.column === 0) return;
+    if(lanes[finalPositions.lane].type === 'forest' && lanes[finalPositions.lane].occupiedPositions.has(finalPositions.column-1)) return;
+    if(!stepStartTimestamp) startMoving = true;
+  }
+  else if (direction === 'right') {
+    if(finalPositions.column === columns - 1 ) return;
+    if(lanes[finalPositions.lane].type === 'forest' && lanes[finalPositions.lane].occupiedPositions.has(finalPositions.column+1)) return;
+    if(!stepStartTimestamp) startMoving = true;
+  }
+  moves.push(direction);
+}
+
+function animate(timestamp) {
+  requestAnimationFrame( animate );
+
+  if(!previousTimestamp) previousTimestamp = timestamp;
+  const delta = timestamp - previousTimestamp;
+  previousTimestamp = timestamp;
+
+  // Animate cars and trucks moving on the lane
+  lanes.forEach(lane => {
+    if(lane.type === 'car' || lane.type === 'truck') {
+      const aBitBeforeTheBeginingOfLane = -boardWidth*zoom/2 - positionWidth*2*zoom;
+      const aBitAfterTheEndOFLane = boardWidth*zoom/2 + positionWidth*2*zoom;
+      lane.vechicles.forEach(vechicle => {
+        if(lane.direction) {
+          vechicle.position.x = vechicle.position.x < aBitBeforeTheBeginingOfLane ? aBitAfterTheEndOFLane : vechicle.position.x -= lane.speed/16*delta;
+        }else{
+          vechicle.position.x = vechicle.position.x > aBitAfterTheEndOFLane ? aBitBeforeTheBeginingOfLane : vechicle.position.x += lane.speed/16*delta;
+        }
+      });
+    }
+  });
+
+  if(startMoving) {
+    stepStartTimestamp = timestamp;
+    startMoving = false;
+  }
+
+  if(stepStartTimestamp) {
+    const moveDeltaTime = timestamp - stepStartTimestamp;
+    const moveDeltaDistance = Math.min(moveDeltaTime/stepTime,1)*positionWidth*zoom;
+    const jumpDeltaDistance = Math.sin(Math.min(moveDeltaTime/stepTime,1)*Math.PI)*8*zoom;
+    switch(moves[0]) {
+      case 'forward': {
+        const positionY = currentLane*positionWidth*zoom + moveDeltaDistance;
+        camera.position.y = initialCameraPositionY + positionY;
+        dirLight.position.y = initialDirLightPositionY + positionY;
+        chicken.position.y = positionY; // initial chicken position is 0
+
+        chicken.position.z = jumpDeltaDistance;
+        break;
+      }
+      case 'backward': {
+        positionY = currentLane*positionWidth*zoom - moveDeltaDistance
+        camera.position.y = initialCameraPositionY + positionY;
+        dirLight.position.y = initialDirLightPositionY + positionY;
+        chicken.position.y = positionY;
+
+        chicken.position.z = jumpDeltaDistance;
+        break;
+      }
+      case 'left': {
+        const positionX = (currentColumn*positionWidth+positionWidth/2)*zoom -boardWidth*zoom/2 - moveDeltaDistance;
+        camera.position.x = initialCameraPositionX + positionX;
+        dirLight.position.x = initialDirLightPositionX + positionX;
+        chicken.position.x = positionX; // initial chicken position is 0
+        chicken.position.z = jumpDeltaDistance;
+        break;
+      }
+      case 'right': {
+        const positionX = (currentColumn*positionWidth+positionWidth/2)*zoom -boardWidth*zoom/2 + moveDeltaDistance;
+        camera.position.x = initialCameraPositionX + positionX;
+        dirLight.position.x = initialDirLightPositionX + positionX;
+        chicken.position.x = positionX;
+
+        chicken.position.z = jumpDeltaDistance;
+        break;
+      }
+    }
+    // Once a step has ended
+    if(moveDeltaTime > stepTime) {
+      switch(moves[0]) {
+        case 'forward': {
+          currentLane++;
+          counterDOM.innerHTML = currentLane;
+          break;
+        }
+        case 'backward': {
+          currentLane--;
+          counterDOM.innerHTML = currentLane;
+          break;
+        }
+        case 'left': {
+          currentColumn--;
+          break;
+        }
+        case 'right': {
+          currentColumn++;
+          break;
+        }
+      }
+      moves.shift();
+      // If more steps are to be taken then restart counter otherwise stop stepping
+      stepStartTimestamp = moves.length === 0 ? null : timestamp;
+    }
+  }
+
+  // Hit test
+  if(lanes[currentLane].type === 'car' || lanes[currentLane].type === 'truck') {
+    const chickenMinX = chicken.position.x - chickenSize*zoom/2;
+    const chickenMaxX = chicken.position.x + chickenSize*zoom/2;
+    const vechicleLength = { car: 60, truck: 105}[lanes[currentLane].type];
+    lanes[currentLane].vechicles.forEach(vechicle => {
+      const carMinX = vechicle.position.x - vechicleLength*zoom/2;
+      const carMaxX = vechicle.position.x + vechicleLength*zoom/2;
+      if(chickenMaxX > carMinX && chickenMinX < carMaxX) {
+        endDOM.style.visibility = 'visible';
+      }
+    });
+
+  }
+  renderer.render( scene, camera );
+}
+
+requestAnimationFrame( animate );
