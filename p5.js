@@ -22,7 +22,6 @@ class Raquete {
 }
 
 class Bola {
-  // ...
   
   aumentarVelocidade() {
    const fatorAumento = 1.1;
@@ -112,7 +111,7 @@ checkPadleCollision(paddle) {
     ellipse(this.x, this.y, this.r);
 
   }
-  
+
    verificarColisaoRaquete(raquete) {
     if (
       this.x - this.r / 2 <= raquete.x + raquete.w / 2 &&
