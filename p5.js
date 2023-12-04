@@ -6,16 +6,34 @@ function draw() {
   background(220);
     rect(50, 50, 200);
 }
-// Variaveis para as raquetes e bola 
-let playerPadle, computerPadle, ball;
+// Variáveis para as raquetes, bola e barras horizontais
+let raqueteJogador, raqueteComputador, bola, barraSuperior, barraInferior;
 
 function setup() {
   createCanvas(800, 400);
-    playerPadle = new Padle(30, height / 2, 10, 60);
-    computerPadle = new Padle(width - 40, heigth / 2, 10, 60);
-    ball = new Ball(width / 2, height / 2, 10);
-
+  raqueteJogador = new Raquete(30, height / 2, 10, 60);
+  raqueteComputador = new Raquete(width - 40, height / 2, 10, 60);
+  bola = new Bola(width / 2, height / 2, 10);
+  barraSuperior = new Barra(0, 5, width, 5);
+  barraInferior = new Barra(0, height - 5, width, 5);
 }
+class Raquete {
+   // ...
+}
+
+class Bola {
+   // ...
+}
+if (
+      this.y - this.r / 2 <= barraSuperior.y + barraSuperior.h ||
+      this.y + this.r / 2 >= barraInferior.y - barraInferior.h
+    ) {
+      this.velocidadeY *= -1;
+    }
+       if (this.y - this.r / 2 <= 0 || this.r /2 
+>= height) {
+      this.velocidadeY *= -1;
+      }
 
 function draw() {
   background(0);
@@ -79,11 +97,13 @@ checkPadleCollision(paddle) {
     ) {
       this.velocidadeX *= -1;
     }
+
   }
 
   display() {
     fill(255);
     ellipseMode(CENTER);
     ellipse(this.x, this.y, this.r);
+    
   }
 
