@@ -18,11 +18,17 @@ function setup() {
   barraInferior = new Barra(0, height - 5, width, 5);
 }
 class Raquete {
-   // ...
+  // ...
 }
 
 class Bola {
-   // ...
+  // ...
+  
+  aumentarVelocidade() {
+   const fatorAumento = 1.1;
+   this.velocidadeX *= fatorAumento;
+   this.velocidadeY *= fatorAumento;
+  }
 }
 if (
       this.y - this.r / 2 <= barraSuperior.y + barraSuperior.h ||
@@ -104,6 +110,17 @@ checkPadleCollision(paddle) {
     fill(255);
     ellipseMode(CENTER);
     ellipse(this.x, this.y, this.r);
-    
-  }
 
+  }
+  
+   verificarColisaoRaquete(raquete) {
+    if (
+      this.x - this.r / 2 <= raquete.x + raquete.w / 2 &&
+      this.x + this.r / 2 >= raquete.x - raquete.w / 2 &&
+      this.y + this.r / 2 >= raquete.y - raquete.h / 2 &&
+      this.y - this.r / 2 <= raquete.y + raquete.h / 2
+    ) {
+      this.velocidadeX *= -1;
+      this.aumentarVelocidade();
+    }
+  }
